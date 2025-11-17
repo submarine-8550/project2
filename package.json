@@ -1,0 +1,14 @@
+{
+  "name": "campus-placement-system",
+  "version": "1.0.0",
+  "description": "Full-stack Campus Placement Management System",
+  "scripts": {
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "install:all": "npm install && cd backend && npm install && cd ../frontend && npm install"
+  },
+  "keywords": ["campus-placement", "recruitment", "student", "company"],
+  "author": "",
+  "license": "MIT"
+}
+
