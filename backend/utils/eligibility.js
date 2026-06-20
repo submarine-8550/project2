@@ -4,7 +4,6 @@
  */
 
 import { query } from '../config/database.js';
-import { parseRounds } from './helpers.js';
 
 /**
  * Check if a student is eligible for a drive
@@ -18,7 +17,7 @@ export const checkEligibility = async (studentId, driveId) => {
     const drives = await query(
       `SELECT min_cgpa, rounds, target_employee_type 
        FROM drives 
-       WHERE id = ? AND is_active = TRUE AND status = 'approved'`,
+       WHERE id = ? AND is_active = TRUE AND is_approved = TRUE`,
       [driveId]
     );
 
@@ -30,7 +29,7 @@ export const checkEligibility = async (studentId, driveId) => {
     }
 
     const drive = drives[0];
-    const rounds = parseRounds(drive.rounds);
+    const rounds = JSON.parse(drive.rounds);
 
     // Get student details
     const students = await query(
@@ -124,7 +123,7 @@ export const getEligibleStudents = async (driveId) => {
     const drives = await query(
       `SELECT min_cgpa, rounds, target_employee_type 
        FROM drives 
-       WHERE id = ? AND is_active = TRUE AND status = 'approved'`,
+       WHERE id = ? AND is_active = TRUE`,
       [driveId]
     );
 

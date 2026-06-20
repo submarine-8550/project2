@@ -7,7 +7,6 @@ import express from 'express';
 import { query, beginTransaction, commitTransaction, rollbackTransaction } from '../config/database.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 import { checkEligibility } from '../utils/eligibility.js';
-import { parseRounds } from '../utils/helpers.js';
 
 const router = express.Router();
 
@@ -192,7 +191,7 @@ router.get('/eligible-drives', authorize('student'), async (req, res, next) => {
        FROM drives d
        JOIN companies c ON d.company_id = c.id
        LEFT JOIN drive_required_skills drs ON d.id = drs.drive_id
-       WHERE d.is_active = TRUE AND d.status = 'approved'
+       WHERE d.is_active = TRUE AND d.is_approved = TRUE
        GROUP BY d.id
        ORDER BY d.deadline ASC`,
       []
@@ -212,7 +211,7 @@ router.get('/eligible-drives', authorize('student'), async (req, res, next) => {
         eligibleDrives.push({
           ...drive,
           requiredSkills: drive.required_skills ? drive.required_skills.split(',') : [],
-          rounds: parseRounds(drive.rounds),
+          rounds: JSON.parse(drive.rounds),
           eligible: true,
           qualifiedRounds: eligibility.qualifiedRounds,
           alreadyRegistered: registrations.length > 0,
@@ -327,99 +326,13 @@ router.get('/my-registrations', authorize('student'), async (req, res, next) => 
 
     const formattedRegistrations = registrations.map(reg => ({
       ...reg,
-      qualifiedRounds: parseRounds(reg.qualified_rounds),
+      qualifiedRounds: JSON.parse(reg.qualified_rounds || '[]'),
       registrationData: JSON.parse(reg.registration_data || '{}')
     }));
 
     res.json({
       success: true,
       registrations: formattedRegistrations
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
-/**
- * Get batch placement view for the logged-in student's batch
- * GET /api/students/batch-placement
- */
-router.get('/batch-placement', authorize('student'), async (req, res, next) => {
-  try {
-    const userId = req.user.id;
-
-    const students = await query(
-      'SELECT id, graduation_year FROM students WHERE user_id = ?',
-      [userId]
-    );
-    if (students.length === 0) {
-      return res.status(404).json({ success: false, message: 'Student not found' });
-    }
-
-    const { id: studentId, graduation_year: batchYear } = students[0];
-
-    // Stats for this student's batch
-    const [totalStudents, placedStudents] = await Promise.all([
-      query('SELECT COUNT(*) as count FROM students WHERE graduation_year = ?', [batchYear]),
-      query(
-        `SELECT COUNT(DISTINCT dr.student_id) as count
-         FROM drive_registrations dr
-         JOIN students s ON dr.student_id = s.id
-         WHERE dr.status = 'selected' AND s.graduation_year = ?`,
-        [batchYear]
-      )
-    ]);
-
-    // Upcoming drives eligible for this student's batch
-    const upcomingDrives = await query(
-      `SELECT d.id, d.job_role, d.deadline, d.package_amount, d.package_currency,
-              d.min_cgpa, d.target_graduation_year,
-              c.id as company_id, c.name as company_name,
-              GROUP_CONCAT(drs.skill) as required_skills
-       FROM drives d
-       JOIN companies c ON d.company_id = c.id
-       LEFT JOIN drive_required_skills drs ON d.id = drs.drive_id
-       WHERE d.deadline >= CURDATE()
-         AND d.status = 'approved'
-         AND d.is_active = TRUE
-         AND (d.target_graduation_year = ? OR d.target_graduation_year IS NULL)
-       GROUP BY d.id, c.id, c.name
-       ORDER BY d.deadline ASC`,
-      [batchYear]
-    );
-
-    // Recently visited companies (last 12 months)
-    const recentlyVisited = await query(
-      `SELECT c.id as company_id, c.name as company_name,
-              MAX(d.deadline) as last_visit_date,
-              COUNT(DISTINCT CASE WHEN dr.status = 'selected' THEN dr.student_id END) as selected_count
-       FROM drives d
-       JOIN companies c ON d.company_id = c.id
-       LEFT JOIN drive_registrations dr ON d.id = dr.drive_id
-       WHERE d.deadline < CURDATE()
-         AND d.deadline >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
-         AND d.status = 'approved'
-         AND (d.target_graduation_year = ? OR d.target_graduation_year IS NULL)
-       GROUP BY c.id, c.name
-       ORDER BY last_visit_date DESC`,
-      [batchYear]
-    );
-
-    res.json({
-      success: true,
-      batchYear,
-      stats: {
-        totalStudents: totalStudents[0].count,
-        placedStudents: placedStudents[0].count,
-        placementPercentage: totalStudents[0].count > 0
-          ? Math.round((placedStudents[0].count / totalStudents[0].count) * 100)
-          : 0
-      },
-      upcoming: upcomingDrives.map(d => ({
-        ...d,
-        requiredSkills: d.required_skills ? d.required_skills.split(',') : []
-      })),
-      recentlyVisited
     });
   } catch (error) {
     next(error);

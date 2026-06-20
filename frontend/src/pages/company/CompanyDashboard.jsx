@@ -4,7 +4,6 @@
  */
 
 import { useState, useEffect } from 'react';
-import { Link } from 'react-router-dom';
 import { useAuth } from '../../context/AuthContext';
 import api from '../../utils/api';
 
@@ -58,8 +57,7 @@ const CompanyDashboard = () => {
       driveType: formData.get('driveType'),
       targetEmployeeType: formData.get('targetEmployeeType'),
       rounds: formData.getAll('rounds'),
-      requiredSkills: formData.get('requiredSkills').split(',').map(s => s.trim()).filter(s => s),
-      targetGraduationYear: formData.get('targetGraduationYear') ? parseInt(formData.get('targetGraduationYear')) : null
+      requiredSkills: formData.get('requiredSkills').split(',').map(s => s.trim()).filter(s => s)
     };
 
     try {
@@ -90,7 +88,7 @@ const CompanyDashboard = () => {
   if (loading) {
     return (
       <div className="flex items-center justify-center min-h-screen">
-        <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-indigo-600" />
+        <div className="text-lg">Loading...</div>
       </div>
     );
   }
@@ -105,12 +103,6 @@ const CompanyDashboard = () => {
             </div>
             <div className="flex items-center space-x-4">
               <span className="text-gray-700">{user?.email}</span>
-              <Link
-                to="/batch-placement"
-                className="text-indigo-600 hover:text-indigo-500 text-sm font-medium"
-              >
-                Placement History
-              </Link>
               <button
                 onClick={logout}
                 className="bg-red-600 hover:bg-red-700 text-white px-4 py-2 rounded"
@@ -244,17 +236,6 @@ const CompanyDashboard = () => {
                     type="text"
                     name="requiredSkills"
                     placeholder="JavaScript, React, Node.js"
-                    className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3"
-                  />
-                </div>
-                <div>
-                  <label className="block text-sm font-medium text-gray-700">Target Batch Year</label>
-                  <input
-                    type="number"
-                    name="targetGraduationYear"
-                    min="2000"
-                    max="2100"
-                    placeholder="e.g. 2026 (optional)"
                     className="mt-1 block w-full border border-gray-300 rounded-md shadow-sm py-2 px-3"
                   />
                 </div>

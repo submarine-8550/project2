@@ -117,21 +117,15 @@ CREATE TABLE drives (
     drive_type ENUM('core', 'non-core') NOT NULL,
     target_employee_type ENUM('Fresher', 'Experienced', 'Intern') NOT NULL,
     rounds JSON NOT NULL COMMENT 'Array of round types: ["aptitude", "technical", "HR"]',
-    status ENUM('pending', 'approved', 'rejected') NOT NULL DEFAULT 'pending',
-    rejection_reason TEXT,
-    approved_by_admin_id INT NULL,
-    approved_at DATETIME NULL,
     is_active BOOLEAN DEFAULT TRUE,
-    target_graduation_year INT NULL DEFAULT NULL COMMENT 'Batch year this drive targets, e.g. 2026. NULL means open to all batches.',
+    is_approved BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
     FOREIGN KEY (company_id) REFERENCES companies(id) ON DELETE CASCADE,
-    FOREIGN KEY (approved_by_admin_id) REFERENCES admins(id) ON DELETE SET NULL,
     INDEX idx_company (company_id),
-    INDEX idx_status (status),
+    INDEX idx_approved (is_approved),
     INDEX idx_active (is_active),
-    INDEX idx_deadline (deadline),
-    INDEX idx_target_grad_year (target_graduation_year)
+    INDEX idx_deadline (deadline)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Drive required skills table

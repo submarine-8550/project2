@@ -10,8 +10,6 @@ import fs from 'fs';
 import { query, beginTransaction, commitTransaction, rollbackTransaction } from '../config/database.js';
 import { authenticate, authorize } from '../middleware/auth.js';
 import bcrypt from 'bcryptjs';
-import { parseRounds } from '../utils/helpers.js';
-import { checkEligibility } from '../utils/eligibility.js';
 
 const router = express.Router();
 
@@ -31,14 +29,14 @@ router.get('/stats', async (req, res, next) => {
     const [
       totalStudents,
       totalCompanies,
-      totalActiveApprovedDrives,
+      totalDrives,
       pendingApprovals,
       totalRegistrations,
       placedStudents
     ] = await Promise.all([
       query('SELECT COUNT(*) as count FROM students'),
       query('SELECT COUNT(*) as count FROM companies'),
-      query("SELECT COUNT(*) as count FROM drives WHERE status = 'approved' AND is_active = TRUE"),
+      query('SELECT COUNT(*) as count FROM drives'),
       query('SELECT COUNT(*) as count FROM companies WHERE is_approved = FALSE'),
       query('SELECT COUNT(*) as count FROM drive_registrations'),
       query("SELECT COUNT(DISTINCT student_id) as count FROM drive_registrations WHERE status = 'selected'")
@@ -49,7 +47,7 @@ router.get('/stats', async (req, res, next) => {
       stats: {
         totalStudents: totalStudents[0].count,
         totalCompanies: totalCompanies[0].count,
-        totalDrives: totalActiveApprovedDrives[0].count,
+        totalDrives: totalDrives[0].count,
         pendingApprovals: pendingApprovals[0].count,
         totalRegistrations: totalRegistrations[0].count,
         placedStudents: placedStudents[0].count
@@ -124,9 +122,8 @@ router.put('/companies/:companyId/approve', async (req, res, next) => {
  */
 router.get('/drives', async (req, res, next) => {
   try {
-    const { approved, status, search } = req.query;
+    const { approved, search } = req.query;
 
-    // FIX: Admin must see all drives including rejected
     let sql = `SELECT d.*, c.name as company_name, c.email as company_email,
                       GROUP_CONCAT(drs.skill) as required_skills
                FROM drives d
@@ -135,12 +132,9 @@ router.get('/drives', async (req, res, next) => {
                WHERE 1=1`;
     const params = [];
 
-    if (status) {
-      sql += ' AND d.status = ?';
-      params.push(status);
-    } else if (approved !== undefined) {
-      sql += ' AND d.status = ?';
-      params.push(approved === 'true' ? 'approved' : 'pending');
+    if (approved !== undefined) {
+      sql += ' AND d.is_approved = ?';
+      params.push(approved === 'true');
     }
 
     if (search) {
@@ -156,7 +150,7 @@ router.get('/drives', async (req, res, next) => {
     const formattedDrives = drives.map(drive => ({
       ...drive,
       requiredSkills: drive.required_skills ? drive.required_skills.split(',') : [],
-      rounds: parseRounds(drive.rounds)
+      rounds: JSON.parse(drive.rounds || '[]')
     }));
 
     res.json({
@@ -175,35 +169,16 @@ router.get('/drives', async (req, res, next) => {
 router.put('/drives/:driveId/approve', async (req, res, next) => {
   try {
     const driveId = parseInt(req.params.driveId);
-    const { approved, rejectionReason } = req.body;
-    const status = approved === true ? 'approved' : 'rejected';
-    const adminUserId = req.user.id;
-
-    const updateFields = ['status = ?'];
-    const params = [status];
-
-    if (status === 'approved') {
-      updateFields.push('rejection_reason = NULL');
-      updateFields.push('approved_by_admin_id = ?');
-      updateFields.push('approved_at = NOW()');
-      params.push(adminUserId);
-    } else {
-      updateFields.push('rejection_reason = ?');
-      updateFields.push('approved_by_admin_id = NULL');
-      updateFields.push('approved_at = NULL');
-      params.push(rejectionReason || null);
-    }
-
-    params.push(driveId);
+    const { approved } = req.body;
 
     await query(
-      `UPDATE drives SET ${updateFields.join(', ')} WHERE id = ?`,
-      params
+      'UPDATE drives SET is_approved = ? WHERE id = ?',
+      [approved === true, driveId]
     );
 
     res.json({
       success: true,
-      message: `Drive ${status} successfully`
+      message: `Drive ${approved ? 'approved' : 'rejected'} successfully`
     });
   } catch (error) {
     next(error);
@@ -265,11 +240,13 @@ router.get('/students', async (req, res, next) => {
 
     sql += ' GROUP BY s.id';
 
+    // Filter by skill if provided
     if (skill) {
       sql += ' HAVING FIND_IN_SET(?, skills)';
       params.push(skill);
     }
 
+    // Sorting
     const validSortBy = ['name', 'cgpa', 'department', 'graduation_year'];
     const sortField = validSortBy.includes(sortBy) ? sortBy : 's.name';
     const sortDir = sortOrder === 'desc' ? 'DESC' : 'ASC';
@@ -312,6 +289,7 @@ router.post('/students/upload', upload.single('csv'), async (req, res, next) => 
     const students = [];
     const errors = [];
 
+    // Parse CSV file
     await new Promise((resolve, reject) => {
       fs.createReadStream(req.file.path)
         .pipe(csv())
@@ -322,14 +300,17 @@ router.post('/students/upload', upload.single('csv'), async (req, res, next) => 
         .on('error', reject);
     });
 
+    // Process each student
     for (let i = 0; i < students.length; i++) {
       const row = students[i];
       try {
+        // Validate required fields
         if (!row.email || !row.name || !row.roll_number || !row.department || !row.cgpa) {
           errors.push(`Row ${i + 2}: Missing required fields`);
           continue;
         }
 
+        // Check if user already exists
         const existingUsers = await connection.execute(
           'SELECT id FROM users WHERE email = ?',
           [row.email]
@@ -339,6 +320,7 @@ router.post('/students/upload', upload.single('csv'), async (req, res, next) => 
           continue;
         }
 
+        // Check if roll number already exists
         const existingStudents = await connection.execute(
           'SELECT id FROM students WHERE roll_number = ?',
           [row.roll_number]
@@ -348,15 +330,18 @@ router.post('/students/upload', upload.single('csv'), async (req, res, next) => 
           continue;
         }
 
+        // Generate a default password (should be changed on first login)
         const defaultPassword = row.roll_number + '@123';
         const passwordHash = await bcrypt.hash(defaultPassword, 10);
 
+        // Create user
         const userResult = await connection.execute(
           'INSERT INTO users (email, password_hash, role) VALUES (?, ?, ?)',
           [row.email, passwordHash, 'student']
         );
         const userId = userResult[0].insertId;
 
+        // Create student
         const studentResult = await connection.execute(
           `INSERT INTO students 
            (user_id, name, email, roll_number, department, cgpa, domain, 
@@ -378,6 +363,7 @@ router.post('/students/upload', upload.single('csv'), async (req, res, next) => 
         );
         const studentId = studentResult[0].insertId;
 
+        // Add skills if provided
         if (row.skills) {
           const skills = row.skills.split(',').map(s => s.trim()).filter(s => s);
           for (const skill of skills) {
@@ -388,6 +374,7 @@ router.post('/students/upload', upload.single('csv'), async (req, res, next) => 
           }
         }
 
+        // Add preferred job types if provided
         if (row.preferred_job_types) {
           const jobTypes = row.preferred_job_types.split(',').map(j => j.trim()).filter(j => j);
           for (const jobType of jobTypes) {
@@ -400,6 +387,7 @@ router.post('/students/upload', upload.single('csv'), async (req, res, next) => 
           }
         }
 
+        // Add preferred locations if provided
         if (row.preferred_locations) {
           const locations = row.preferred_locations.split(',').map(l => l.trim()).filter(l => l);
           for (const location of locations) {
@@ -414,6 +402,7 @@ router.post('/students/upload', upload.single('csv'), async (req, res, next) => 
       }
     }
 
+    // Clean up uploaded file
     fs.unlinkSync(req.file.path);
 
     if (errors.length > 0 && students.length === errors.length) {
@@ -435,6 +424,7 @@ router.post('/students/upload', upload.single('csv'), async (req, res, next) => 
     });
   } catch (error) {
     await rollbackTransaction(connection);
+    // Clean up uploaded file
     if (req.file && fs.existsSync(req.file.path)) {
       fs.unlinkSync(req.file.path);
     }
@@ -461,6 +451,7 @@ router.post('/drives/:driveId/assign-students', async (req, res, next) => {
       });
     }
 
+    // Verify drive exists
     const drives = await query('SELECT id FROM drives WHERE id = ?', [driveId]);
     if (drives.length === 0) {
       await rollbackTransaction(connection);
@@ -470,12 +461,15 @@ router.post('/drives/:driveId/assign-students', async (req, res, next) => {
       });
     }
 
+    // Import eligibility check
+    const { checkEligibility } = await import('../utils/eligibility.js');
 
     let assigned = 0;
     const errors = [];
 
     for (const studentId of studentIds) {
       try {
+        // Check if already registered
         const existing = await connection.execute(
           'SELECT id FROM drive_registrations WHERE drive_id = ? AND student_id = ?',
           [driveId, studentId]
@@ -485,12 +479,14 @@ router.post('/drives/:driveId/assign-students', async (req, res, next) => {
           continue;
         }
 
+        // Check eligibility
         const eligibility = await checkEligibility(studentId, driveId);
         if (!eligibility.eligible) {
           errors.push(`Student ${studentId}: ${eligibility.reason}`);
           continue;
         }
 
+        // Register student
         await connection.execute(
           `INSERT INTO drive_registrations (drive_id, student_id, qualified_rounds, status)
            VALUES (?, ?, ?, 'applied')`,
@@ -516,110 +512,5 @@ router.post('/drives/:driveId/assign-students', async (req, res, next) => {
   }
 });
 
-/**
- * Get batch-wise company placement data
- * GET /api/admin/batch/:year
- * Returns: stats, upcoming drives, recently visited companies, once-in-3yr companies
- */
-router.get('/batch/:year', async (req, res, next) => {
-  try {
-    const batchYear = parseInt(req.params.year);
-    if (isNaN(batchYear) || batchYear < 2000 || batchYear > 2100) {
-      return res.status(400).json({ success: false, message: 'Invalid batch year' });
-    }
-
-    // --- Stats for this batch ---
-    const [totalStudents, placedStudents, totalOffers] = await Promise.all([
-      query('SELECT COUNT(*) as count FROM students WHERE graduation_year = ?', [batchYear]),
-      query(
-        `SELECT COUNT(DISTINCT dr.student_id) as count
-         FROM drive_registrations dr
-         JOIN students s ON dr.student_id = s.id
-         WHERE dr.status = 'selected' AND s.graduation_year = ?`,
-        [batchYear]
-      ),
-      query(
-        `SELECT COUNT(*) as count
-         FROM drive_registrations dr
-         JOIN students s ON dr.student_id = s.id
-         WHERE dr.status = 'selected' AND s.graduation_year = ?`,
-        [batchYear]
-      )
-    ]);
-
-    // --- Bucket 1: Upcoming drives (deadline in future, approved, targeting this batch) ---
-    const upcomingDrives = await query(
-      `SELECT d.id, d.job_role, d.deadline, d.package_amount, d.package_currency,
-              d.status, d.target_graduation_year,
-              c.id as company_id, c.name as company_name, c.email as company_email
-       FROM drives d
-       JOIN companies c ON d.company_id = c.id
-       WHERE d.deadline >= CURDATE()
-         AND d.status IN ('approved', 'pending')
-         AND (d.target_graduation_year = ? OR d.target_graduation_year IS NULL)
-       ORDER BY d.deadline ASC`,
-      [batchYear]
-    );
-
-    // --- Bucket 2: Recently visited (completed drives in last 12 months for this batch) ---
-    const recentlyVisited = await query(
-      `SELECT c.id as company_id, c.name as company_name, c.email as company_email,
-              MAX(d.deadline) as last_visit_date,
-              COUNT(DISTINCT d.id) as drive_count,
-              COUNT(DISTINCT CASE WHEN dr.status = 'selected' THEN dr.student_id END) as selected_count
-       FROM drives d
-       JOIN companies c ON d.company_id = c.id
-       LEFT JOIN drive_registrations dr ON d.id = dr.drive_id
-       WHERE d.deadline < CURDATE()
-         AND d.deadline >= DATE_SUB(CURDATE(), INTERVAL 12 MONTH)
-         AND d.status = 'approved'
-         AND (d.target_graduation_year = ? OR d.target_graduation_year IS NULL)
-       GROUP BY c.id, c.name, c.email
-       ORDER BY last_visit_date DESC`,
-      [batchYear]
-    );
-
-    // --- Bucket 3: Visited exactly once in last 3 years, never returned ---
-    const visitedOnce = await query(
-      `SELECT c.id as company_id, c.name as company_name, c.email as company_email,
-              MAX(d.deadline) as last_visit_date,
-              COUNT(DISTINCT d.id) as total_drives
-       FROM drives d
-       JOIN companies c ON d.company_id = c.id
-       WHERE d.deadline >= DATE_SUB(CURDATE(), INTERVAL 3 YEAR)
-         AND d.status = 'approved'
-       GROUP BY c.id, c.name, c.email
-       HAVING COUNT(DISTINCT d.id) = 1
-          AND MAX(d.deadline) < CURDATE()
-       ORDER BY last_visit_date DESC`,
-      []
-    );
-
-    // --- All available batch years (for the year picker) ---
-    const batchYears = await query(
-      `SELECT DISTINCT graduation_year
-       FROM students
-       ORDER BY graduation_year DESC`,
-      []
-    );
-
-    res.json({
-      success: true,
-      batchYear,
-      stats: {
-        totalStudents: totalStudents[0].count,
-        placedStudents: placedStudents[0].count,
-        totalCompaniesVisited: recentlyVisited.length,
-        totalOffers: totalOffers[0].count
-      },
-      upcoming: upcomingDrives,
-      recentlyVisited,
-      visitedOnce,
-      availableBatchYears: batchYears.map(r => r.graduation_year)
-    });
-  } catch (error) {
-    next(error);
-  }
-});
-
 export default router;
+

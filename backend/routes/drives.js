@@ -5,7 +5,6 @@
 
 import express from 'express';
 import { query } from '../config/database.js';
-import { parseRounds } from '../utils/helpers.js';
 
 const router = express.Router();
 
@@ -22,7 +21,7 @@ router.get('/', async (req, res, next) => {
                FROM drives d
                JOIN companies c ON d.company_id = c.id
                LEFT JOIN drive_required_skills drs ON d.id = drs.drive_id
-               WHERE d.is_active = TRUE AND d.status = 'approved'`;
+               WHERE d.is_active = TRUE AND d.is_approved = TRUE`;
     const params = [];
 
     if (search) {
@@ -48,7 +47,7 @@ router.get('/', async (req, res, next) => {
     const formattedDrives = drives.map(drive => ({
       ...drive,
       requiredSkills: drive.required_skills ? drive.required_skills.split(',') : [],
-      rounds: parseRounds(drive.rounds)
+      rounds: JSON.parse(drive.rounds || '[]')
     }));
 
     res.json({
@@ -92,7 +91,7 @@ router.get('/:id', async (req, res, next) => {
       drive: {
         ...drive,
         requiredSkills: drive.required_skills ? drive.required_skills.split(',') : [],
-        rounds: parseRounds(drive.rounds)
+        rounds: JSON.parse(drive.rounds || '[]')
       }
     });
   } catch (error) {
