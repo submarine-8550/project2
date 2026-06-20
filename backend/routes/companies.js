@@ -8,6 +8,7 @@ import { query, beginTransaction, commitTransaction, rollbackTransaction } from 
 import { authenticate, authorize } from '../middleware/auth.js';
 import { getEligibleStudents } from '../utils/eligibility.js';
 import { validateDriveCreation } from '../utils/validation.js';
+import { parseRounds } from '../utils/helpers.js';
 
 const router = express.Router();
 
@@ -113,13 +114,13 @@ router.get('/my-drives', authorize('company'), async (req, res, next) => {
     const companyId = companies[0].id;
 
     const drives = await query(
-      `SELECT d.*, 
+      `SELECT d.*,
               GROUP_CONCAT(drs.skill) as required_skills,
               COUNT(DISTINCT dr.id) as registered_count
        FROM drives d
        LEFT JOIN drive_required_skills drs ON d.id = drs.drive_id
        LEFT JOIN drive_registrations dr ON d.id = dr.drive_id
-       WHERE d.company_id = ?
+       WHERE d.company_id = ? AND d.status != 'rejected'
        GROUP BY d.id
        ORDER BY d.created_at DESC`,
       [companyId]
@@ -128,7 +129,10 @@ router.get('/my-drives', authorize('company'), async (req, res, next) => {
     const formattedDrives = drives.map(drive => ({
       ...drive,
       requiredSkills: drive.required_skills ? drive.required_skills.split(',') : [],
-      rounds: JSON.parse(drive.rounds || '[]')
+      rounds: parseRounds(drive.rounds),
+      status: drive.status,
+      rejectionReason: drive.rejection_reason,
+      approvedAt: drive.approved_at
     }));
 
     res.json({
@@ -159,7 +163,8 @@ router.post('/drives', authorize('company'), validateDriveCreation, async (req, 
       driveType,
       targetEmployeeType,
       rounds,
-      requiredSkills
+      requiredSkills,
+      targetGraduationYear
     } = req.body;
 
     // Get company ID
@@ -173,12 +178,12 @@ router.post('/drives', authorize('company'), validateDriveCreation, async (req, 
     }
     const companyId = companies[0].id;
 
-    // Create drive (not approved by default)
+    // Create drive (pending approval)
     const driveResult = await connection.execute(
       `INSERT INTO drives 
        (company_id, job_role, min_cgpa, package_amount, package_currency, deadline, 
-        openings_count, drive_type, target_employee_type, rounds, is_approved)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, FALSE)`,
+        openings_count, drive_type, target_employee_type, rounds, status, target_graduation_year)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
       [
         companyId,
         jobRole,
@@ -189,7 +194,8 @@ router.post('/drives', authorize('company'), validateDriveCreation, async (req, 
         openingsCount,
         driveType,
         targetEmployeeType,
-        JSON.stringify(rounds)
+        JSON.stringify(rounds),
+        targetGraduationYear || null
       ]
     );
 
@@ -210,7 +216,10 @@ router.post('/drives', authorize('company'), validateDriveCreation, async (req, 
     res.status(201).json({
       success: true,
       message: 'Drive created successfully. Waiting for admin approval.',
-      driveId
+      drive: {
+        id: driveId,
+        status: 'pending'
+      }
     });
   } catch (error) {
     await rollbackTransaction(connection);
@@ -443,26 +452,22 @@ router.put('/drives/:driveId/students/:studentId/interview/:roundId', authorize(
     // If student passed all rounds, update registration status to selected
     if (status === 'passed') {
       const allRounds = await query(
-        `SELECT COUNT(*) as total, 
-                SUM(CASE WHEN status = 'passed' THEN 1 ELSE 0 END) as passed
+        `SELECT COUNT(*) as total,
+                SUM(CASE WHEN status = 'passed' THEN 1 ELSE 0 END) as passed,
+                SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) as failed
          FROM interview_rounds
          WHERE drive_id = ? AND student_id = ?`,
         [rounds[0].drive_id, rounds[0].student_id]
       );
 
-      const driveRounds = await query(
-        'SELECT rounds FROM drives WHERE id = ?',
-        [rounds[0].drive_id]
-      );
+      const { total, passed, failed } = allRounds[0];
 
-      if (driveRounds.length > 0) {
-        const requiredRounds = JSON.parse(driveRounds[0].rounds);
-        if (allRounds[0].passed >= requiredRounds.length) {
-          await query(
-            'UPDATE drive_registrations SET status = ? WHERE drive_id = ? AND student_id = ?',
-            ['selected', rounds[0].drive_id, rounds[0].student_id]
-          );
-        }
+      // Student is selected only if they passed ALL scheduled rounds and none are failed
+      if (passed > 0 && passed === total && failed === 0) {
+        await query(
+          'UPDATE drive_registrations SET status = ? WHERE drive_id = ? AND student_id = ?',
+          ['selected', rounds[0].drive_id, rounds[0].student_id]
+        );
       }
     }
 
@@ -475,5 +480,60 @@ router.put('/drives/:driveId/students/:studentId/interview/:roundId', authorize(
   }
 });
 
-export default router;
+/**
+ * Get this company's placement history grouped by batch year
+ * GET /api/companies/batch-history
+ */
+router.get('/batch-history', authorize('company'), async (req, res, next) => {
+  try {
+    const userId = req.user.id;
 
+    const companies = await query('SELECT id FROM companies WHERE user_id = ?', [userId]);
+    if (companies.length === 0) {
+      return res.status(404).json({ success: false, message: 'Company not found' });
+    }
+    const companyId = companies[0].id;
+
+    // All drives by this company, grouped by target batch year
+    const history = await query(
+      `SELECT
+         COALESCE(d.target_graduation_year, YEAR(d.deadline)) as batch_year,
+         COUNT(DISTINCT d.id) as drive_count,
+         MAX(d.deadline) as last_drive_date,
+         COUNT(DISTINCT CASE WHEN dr.status = 'selected' THEN dr.student_id END) as selected_count,
+         COUNT(DISTINCT dr.student_id) as total_registered,
+         GROUP_CONCAT(DISTINCT d.job_role ORDER BY d.deadline DESC SEPARATOR ', ') as roles
+       FROM drives d
+       LEFT JOIN drive_registrations dr ON d.id = dr.drive_id
+       WHERE d.company_id = ? AND d.status = 'approved'
+       GROUP BY COALESCE(d.target_graduation_year, YEAR(d.deadline))
+       ORDER BY batch_year DESC`,
+      [companyId]
+    );
+
+    // Upcoming drives for this company
+    const upcoming = await query(
+      `SELECT d.id, d.job_role, d.deadline, d.target_graduation_year, d.status,
+              GROUP_CONCAT(drs.skill) as required_skills
+       FROM drives d
+       LEFT JOIN drive_required_skills drs ON d.id = drs.drive_id
+       WHERE d.company_id = ? AND d.deadline >= CURDATE()
+       GROUP BY d.id
+       ORDER BY d.deadline ASC`,
+      [companyId]
+    );
+
+    res.json({
+      success: true,
+      history,
+      upcoming: upcoming.map(d => ({
+        ...d,
+        requiredSkills: d.required_skills ? d.required_skills.split(',') : []
+      }))
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+export default router;

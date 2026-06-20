@@ -12,6 +12,30 @@ import { validateLogin, validateStudentRegistration, validateCompanyRegistration
 
 const router = express.Router();
 
+async function fetchStudentProfile(userId) {
+  const students = await query(
+    `SELECT s.*,
+            GROUP_CONCAT(DISTINCT ss.skill) as skills,
+            GROUP_CONCAT(DISTINCT spjt.job_type) as preferred_job_types,
+            GROUP_CONCAT(DISTINCT spl.location) as preferred_locations
+     FROM students s
+     LEFT JOIN student_skills ss ON s.id = ss.student_id
+     LEFT JOIN student_preferred_job_types spjt ON s.id = spjt.student_id
+     LEFT JOIN student_preferred_locations spl ON s.id = spl.student_id
+     WHERE s.user_id = ?
+     GROUP BY s.id`,
+    [userId]
+  );
+  if (students.length === 0) return null;
+  const s = students[0];
+  return {
+    ...s,
+    skills: s.skills ? s.skills.split(',') : [],
+    preferredJobTypes: s.preferred_job_types ? s.preferred_job_types.split(',') : [],
+    preferredLocations: s.preferred_locations ? s.preferred_locations.split(',') : []
+  };
+}
+
 /**
  * Register a new student
  * POST /api/auth/register/student
@@ -190,11 +214,7 @@ router.post('/register/company', validateCompanyRegistration, async (req, res, n
     });
   } catch (error) {
     await rollbackTransaction(connection);
-    console.error('Company registration error:', error);
-    return res.status(500).json({
-      success: false,
-      message: error.message || 'Registration failed. Please try again.'
-    });
+    next(error);
   }
 });
 
@@ -262,11 +282,7 @@ router.post('/login', validateLogin, async (req, res, next) => {
       }
     });
   } catch (error) {
-    console.error('Login error:', error);
-    return res.status(500).json({
-      success: false,
-      message: error.message || 'Login failed. Please try again.'
-    });
+    next(error);
   }
 });
 
@@ -282,28 +298,7 @@ router.get('/me', authenticate, async (req, res, next) => {
     let userData = {};
 
     if (role === 'student') {
-      const students = await query(
-        `SELECT s.*, 
-                GROUP_CONCAT(DISTINCT ss.skill) as skills,
-                GROUP_CONCAT(DISTINCT spjt.job_type) as preferred_job_types,
-                GROUP_CONCAT(DISTINCT spl.location) as preferred_locations
-         FROM students s
-         LEFT JOIN student_skills ss ON s.id = ss.student_id
-         LEFT JOIN student_preferred_job_types spjt ON s.id = spjt.student_id
-         LEFT JOIN student_preferred_locations spl ON s.id = spl.student_id
-         WHERE s.user_id = ?
-         GROUP BY s.id`,
-        [userId]
-      );
-      if (students.length > 0) {
-        const student = students[0];
-        userData = {
-          ...student,
-          skills: student.skills ? student.skills.split(',') : [],
-          preferredJobTypes: student.preferred_job_types ? student.preferred_job_types.split(',') : [],
-          preferredLocations: student.preferred_locations ? student.preferred_locations.split(',') : []
-        };
-      }
+      userData = await fetchStudentProfile(userId) || {};
     } else if (role === 'company') {
       const companies = await query(
         'SELECT * FROM companies WHERE user_id = ?',
@@ -332,11 +327,7 @@ router.get('/me', authenticate, async (req, res, next) => {
       }
     });
   } catch (error) {
-    console.error('Get user error:', error);
-    return res.status(500).json({
-      success: false,
-      message: error.message || 'Failed to fetch user information.'
-    });
+    next(error);
   }
 });
 

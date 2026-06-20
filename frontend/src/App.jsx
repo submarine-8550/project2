@@ -3,7 +3,8 @@
  * Sets up routing and authentication context
  */
 
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { useEffect } from 'react';
+import { HashRouter as Router, Routes, Route, Navigate, useLocation } from 'react-router-dom';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import ProtectedRoute from './components/ProtectedRoute';
 import Login from './pages/Login';
@@ -12,6 +13,7 @@ import StudentDashboard from './pages/student/StudentDashboard';
 import StudentProfile from './pages/student/StudentProfile';
 import CompanyDashboard from './pages/company/CompanyDashboard';
 import AdminDashboard from './pages/admin/AdminDashboard';
+import BatchPlacementPage from './pages/BatchPlacementPage';
 
 // Home component that redirects based on user role
 const Home = () => {
@@ -45,10 +47,20 @@ const Unauthorized = () => {
   );
 };
 
+// Reset scroll position on route change
+const ScrollToTop = () => {
+  const { pathname } = useLocation();
+  useEffect(() => {
+    window.scrollTo(0, 0);
+  }, [pathname]);
+  return null;
+};
+
 function App() {
   return (
     <AuthProvider>
       <Router>
+        <ScrollToTop />
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/login" element={<Login />} />
@@ -89,6 +101,16 @@ function App() {
             element={
               <ProtectedRoute allowedRoles={['admin']}>
                 <AdminDashboard />
+              </ProtectedRoute>
+            }
+          />
+          
+          {/* Batch Placement — all roles */}
+          <Route
+            path="/batch-placement"
+            element={
+              <ProtectedRoute allowedRoles={['admin', 'student', 'company']}>
+                <BatchPlacementPage />
               </ProtectedRoute>
             }
           />
